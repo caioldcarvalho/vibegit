@@ -170,6 +170,39 @@ program
     console.log('Initialized .cogitlog/')
   })
 
+// ── remindme ──────────────────────────────────────────────────────────────────
+
+program
+  .command('remindme')
+  .description('Append cogitlog usage reminder to agent instruction files (CLAUDE.md, AGENTS.md, etc.)')
+  .action(() => {
+    const projectRoot = getGitRoot() ?? process.cwd()
+    const found: string[] = []
+    const skipped: string[] = []
+
+    for (const rel of AGENT_INSTRUCTION_FILES) {
+      const filePath = path.join(projectRoot, rel)
+      if (!fs.existsSync(filePath)) continue
+      const content = fs.readFileSync(filePath, 'utf8')
+      if (content.includes('cogitlog')) {
+        skipped.push(rel)
+      } else {
+        fs.appendFileSync(filePath, COGITLOG_HINT)
+        found.push(rel)
+        console.log(`  Appended reminder → ${rel}`)
+      }
+    }
+
+    if (found.length === 0 && skipped.length === 0) {
+      // No instruction files found — create CLAUDE.md
+      const claudeMd = path.join(projectRoot, 'CLAUDE.md')
+      fs.writeFileSync(claudeMd, COGITLOG_HINT.trimStart())
+      console.log('  Created CLAUDE.md with cogitlog reminder')
+    } else if (found.length === 0) {
+      console.log(`  Already present in: ${skipped.join(', ')}`)
+    }
+  })
+
 // ── begin ─────────────────────────────────────────────────────────────────────
 
 program
