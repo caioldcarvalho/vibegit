@@ -6,7 +6,7 @@
     "vibegit": "./dist/cli.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && chmod +x dist/cli.js",
     "dev": "tsx src/cli.ts",
     "prepublishOnly": "npm run build"
   },
