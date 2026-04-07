@@ -124,11 +124,24 @@ At the end, close the session:
 Run \`cogitlog onboard\` for full instructions.
 `
 
-function appendCogitlogHint(filePath: string): void {
+function replaceCogitlogSection(content: string): string {
+  const sectionRe = /\n?## cogitlog\n[\s\S]*?(?=\n## |\n# |$)/
+  return content.replace(sectionRe, '') + COGITLOG_HINT
+}
+
+function appendCogitlogHint(filePath: string, force = false): 'appended' | 'replaced' | 'skipped' {
   const content = fs.readFileSync(filePath, 'utf8')
-  if (content.includes('## cogitlog')) return // already has cogitlog section
+  const hasSection = content.includes('## cogitlog')
+
+  if (hasSection && !force) return 'skipped'
+
+  if (hasSection && force) {
+    fs.writeFileSync(filePath, replaceCogitlogSection(content))
+    return 'replaced'
+  }
+
   fs.appendFileSync(filePath, COGITLOG_HINT)
-  console.log(`  Appended cogitlog reminder → ${path.relative(process.cwd(), filePath)}`)
+  return 'appended'
 }
 
 program
@@ -169,8 +182,8 @@ program
     for (const rel of AGENT_INSTRUCTION_FILES) {
       const filePath = path.join(projectRoot, rel)
       if (fs.existsSync(filePath)) {
-        appendCogitlogHint(filePath)
-        found.push(rel)
+        const result = appendCogitlogHint(filePath)
+        if (result !== 'skipped') found.push(rel)
       }
     }
     if (found.length > 0) {
@@ -185,31 +198,35 @@ program
 program
   .command('remindme')
   .description('Append cogitlog usage reminder to agent instruction files (CLAUDE.md, AGENTS.md, etc.)')
-  .action(() => {
+  .option('--force', 'Replace existing cogitlog section with the latest version')
+  .action((opts: { force?: boolean }) => {
     const projectRoot = getGitRoot() ?? process.cwd()
     const found: string[] = []
+    const replaced: string[] = []
     const skipped: string[] = []
 
     for (const rel of AGENT_INSTRUCTION_FILES) {
       const filePath = path.join(projectRoot, rel)
       if (!fs.existsSync(filePath)) continue
-      const content = fs.readFileSync(filePath, 'utf8')
-      if (content.includes('## cogitlog')) {
-        skipped.push(rel)
-      } else {
-        fs.appendFileSync(filePath, COGITLOG_HINT)
+      const result = appendCogitlogHint(filePath, opts.force)
+      if (result === 'appended') {
         found.push(rel)
         console.log(`  Appended reminder → ${rel}`)
+      } else if (result === 'replaced') {
+        replaced.push(rel)
+        console.log(`  Replaced reminder → ${rel}`)
+      } else {
+        skipped.push(rel)
       }
     }
 
-    if (found.length === 0 && skipped.length === 0) {
+    if (found.length === 0 && replaced.length === 0 && skipped.length === 0) {
       // No instruction files found — create CLAUDE.md
       const claudeMd = path.join(projectRoot, 'CLAUDE.md')
       fs.writeFileSync(claudeMd, COGITLOG_HINT.trimStart())
       console.log('  Created CLAUDE.md with cogitlog reminder')
-    } else if (found.length === 0) {
-      console.log(`  Already present in: ${skipped.join(', ')}`)
+    } else if (found.length === 0 && replaced.length === 0) {
+      console.log(`  Already present in: ${skipped.join(', ')} (use --force to replace)`)
     }
   })
 
