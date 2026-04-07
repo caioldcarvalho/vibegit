@@ -39,6 +39,10 @@ function collect(val: string, acc: string[]): string[] {
   return [...acc, val]
 }
 
+function normFile(file: string): string {
+  return path.normalize(file).replace(/^\.\//, '')
+}
+
 function requireActiveSession(vgDir: string): string {
   resolveInterrupted(vgDir)
   const p = vgPaths(vgDir)
@@ -102,6 +106,12 @@ const COGITLOG_HINT = `
 
 This project uses [cogitlog](https://github.com/caiocarvalho/cogitlog) to log AI agent sessions.
 
+Before investigating a bug or understanding a past decision, check the log:
+  cogitlog why <file>             # why was this file changed?
+  cogitlog context <file>         # all reasoning related to a file
+  cogitlog query "<text>"         # search sessions by topic
+  cogitlog query "<text>" --deep  # also search event bodies
+
 At the start of every task, open a session:
   cogitlog begin "<what you intend to do>"
 
@@ -116,7 +126,7 @@ Run \`cogitlog onboard\` for full instructions.
 
 function appendCogitlogHint(filePath: string): void {
   const content = fs.readFileSync(filePath, 'utf8')
-  if (content.includes('cogitlog')) return // already mentioned
+  if (content.includes('## cogitlog')) return // already has cogitlog section
   fs.appendFileSync(filePath, COGITLOG_HINT)
   console.log(`  Appended cogitlog reminder → ${path.relative(process.cwd(), filePath)}`)
 }
@@ -184,7 +194,7 @@ program
       const filePath = path.join(projectRoot, rel)
       if (!fs.existsSync(filePath)) continue
       const content = fs.readFileSync(filePath, 'utf8')
-      if (content.includes('cogitlog')) {
+      if (content.includes('## cogitlog')) {
         skipped.push(rel)
       } else {
         fs.appendFileSync(filePath, COGITLOG_HINT)
@@ -215,6 +225,14 @@ program
     const vgDir = requireVibegitDir()
     const p = vgPaths(vgDir)
     resolveInterrupted(vgDir)
+
+    if (opts.resume) {
+      const resumeFile = p.session(opts.resume)
+      if (!fs.existsSync(resumeFile)) {
+        console.error(`Session to resume not found: ${opts.resume}`)
+        process.exit(1)
+      }
+    }
 
     const existingId = getCurrentId(p.current)
     if (existingId) {
@@ -452,7 +470,8 @@ program
   .action((file: string, opts: { mentions?: boolean }) => {
     const vgDir = requireVibegitDir()
     const p = vgPaths(vgDir)
-    const entries = readIndex(p.index).filter(e => e.files.includes(file))
+    const needle = normFile(file)
+    const entries = readIndex(p.index).filter(e => e.files.some(f => normFile(f) === needle))
 
     if (entries.length === 0) {
       console.log(`No sessions reference ${file}`)
@@ -463,7 +482,7 @@ program
       const sessionFile = p.session(entry.session_id)
       if (!fs.existsSync(sessionFile)) continue
       const events = readEvents(sessionFile).filter(e => {
-        if (!('files' in e) || !e.files.some(f => f.path === file)) return false
+        if (!('files' in e) || !e.files.some(f => normFile(f.path) === needle)) return false
         return opts.mentions ? true : e.type === 'decision'
       })
       if (events.length === 0) continue
@@ -478,6 +497,57 @@ program
           }
         }
       }
+    }
+  })
+
+// ── context ──────────────────────────────────────────────────────────────────
+
+program
+  .command('context <file>')
+  .description('Show all events (decisions, attempts, notes, uncertainties) related to a file')
+  .action((file: string) => {
+    const vgDir = requireVibegitDir()
+    const p = vgPaths(vgDir)
+    const needle = normFile(file)
+    const entries = readIndex(p.index).filter(e => e.files.some(f => normFile(f) === needle))
+
+    if (entries.length === 0) {
+      console.log(`No sessions reference ${file}`)
+      return
+    }
+
+    let totalEvents = 0
+    for (const entry of entries) {
+      const sessionFile = p.session(entry.session_id)
+      if (!fs.existsSync(sessionFile)) continue
+      const events = readEvents(sessionFile).filter(e =>
+        'files' in e && e.files.some(f => normFile(f.path) === needle),
+      )
+      if (events.length === 0) continue
+
+      totalEvents += events.length
+      const date = entry.started_at.slice(0, 10)
+      console.log(`\n── ${date} ${entry.session_id}`)
+      console.log(`   intent: ${entry.intent} (${entry.outcome})`)
+
+      for (const e of events) {
+        const ts = e.at.slice(11, 16)
+        const body = (e as any).body ?? ''
+        console.log(`   [${ts}] ${e.type.toUpperCase().padEnd(11)} ${body}`)
+        if (e.type === 'decision' && e.alternatives.length > 0) {
+          for (const alt of e.alternatives) {
+            console.log(`            ✗ ${alt.option}: ${alt.reason_rejected}`)
+          }
+        }
+        if (e.type === 'attempt') {
+          const reason = e.reason ? ` — ${e.reason}` : ''
+          console.log(`            outcome: ${e.outcome}${reason}`)
+        }
+      }
+    }
+
+    if (totalEvents === 0) {
+      console.log(`No events reference ${file}`)
     }
   })
 
@@ -685,6 +755,8 @@ program
     }
 
     const activeId = getCurrentId(p.current)
+    const oldEntries = readIndex(p.index)
+    const oldTagsMap = new Map(oldEntries.map(e => [e.session_id, e.tags]))
     const files = fs.readdirSync(p.sessions).filter(f => f.endsWith('.jsonl'))
     const entries: IndexEntry[] = []
 
@@ -712,7 +784,7 @@ program
         outcome,
         outcome_note: close?.outcome_note ?? null,
         files: deriveFiles(events),
-        tags: [],
+        tags: oldTagsMap.get(sessionId) ?? [],
       })
     }
 
@@ -734,8 +806,17 @@ This repo records AI agent sessions in .cogitlog/ alongside git history.
 Each session captures intent, decisions, attempts, and uncertainties so
 future agents (and humans) can understand not just *what* changed but *why*.
 
-EXPECTED BEHAVIOR
------------------
+READING — use these before investigating bugs or understanding past decisions
+---------------------------------------------------------------------------
+  cogitlog why <file>             # why was this file changed? (decisions only)
+  cogitlog context <file>         # all reasoning related to a file
+  cogitlog query "<text>"         # search sessions by topic
+  cogitlog query "<text>" --deep  # also search event bodies
+  cogitlog log                    # list recent sessions
+  cogitlog show [session-id]      # full detail of a session
+
+WRITING — use these to record your own reasoning for future agents
+------------------------------------------------------------------
 At the start of every task, open a session:
 
   cogitlog begin "<what you intend to do>" [--context "<extra background>"]
@@ -753,14 +834,6 @@ At the end of the task, close the session:
 
 Use interrupted if you hit a context limit or are stopping mid-task.
 A future agent can resume with: cogitlog begin "<intent>" --resume <session-id>
-
-QUERYING HISTORY
-----------------
-  cogitlog log                    # list recent sessions
-  cogitlog show [session-id]      # full detail of a session
-  cogitlog why <file>             # decisions that touched a file
-  cogitlog query "<text>"         # search by intent / outcome note
-  cogitlog query "<text>" --deep  # also search event bodies
 
 CURRENT STATUS
 --------------`)
